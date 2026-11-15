@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tests · Hábitos</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main>
+  <h1>Tests de logic.js</h1>
+  <p id="resumen">Ejecutando…</p>
+  <ol id="lista" class="tests"></ol>
+</main>
+<script type="module">
+import * as L from "./logic.js";
+
+const HOY = "2026-11-15"; // domingo; fijo para que los tests no dependan del día real
+const tests = [];
+const test = (nombre, fn) => tests.push({ nombre, fn });
+const eq = (a, b, msg = "") => {
+  if (JSON.stringify(a) !== JSON.stringify(b)) {
+    throw new Error(`${msg} esperado ${JSON.stringify(b)}, obtenido ${JSON.stringify(a)}`);
+  }
+};
+const ok = (v, msg = "") => { if (!v) throw new Error(`${msg} esperado verdadero`); };
+// timestamptz de una hora LOCAL (como lo devolvería Supabase)
+const ts = (y, m, d, hh = 12, mm = 0) => new Date(y, m - 1, d, hh, mm).toISOString();
+const mk = (o = {}) => ({
+  id: "h1", name: "Test", kind: "construir", measure: "check",
+  target_num: null, target_time: null, target_dir: null,
+  days: [0, 1, 2, 3, 4, 5, 6], active: true, created_at: ts(2026, 11, 1), ...o,
+});
+// { 'YYYY-MM-DD': done } → Map fecha → checkin
+const regs = (o) => new Map(Object.entries(o).map(([d, done]) => [d, { date: d, done }]));
+
+test("Fecha local cerca de medianoche y día de la semana", () => {
+  eq(L.fmtDate(new Date(2026, 10, 15, 23, 59, 59)), "2026-11-15", "23:59:59 →");
+  eq(L.fmtDate(new Date(2026, 10, 16, 0, 0, 1)), "2026-11-16", "00:00:01 →");
+  eq(L.parseDate("2026-11-15").getDate(), 15, "parseDate no corre el día:");
+  eq(L.weekday("2026-11-15"), 0, "15/11/2026 es domingo:");
+  eq(L.weekday("2026-11-16"), 1, "16/11/2026 es lunes:");
+  eq(L.createdDate({ created_at: ts(2026, 11, 14, 23, 30) }), "2026-11-14", "creado 23:30 local →");
+  eq(L.createdDate({ created_at: ts(2026, 11, 15, 0, 10) }), "2026-11-15", "creado 00:10 local →");
+  eq(L.createdDate({ created_at: "2026-11-14T12:00:00.123456+00:00" }),
+     L.createdDate({ created_at: "2026-11-14T12:00:00.123+00:00" }), "microsegundos (formato de Supabase) →");
+  ok(L.createdDate({ created_at: "2026-11-14T12:00:00.123456+00:00" }) !== "0000-01-01", "microsegundos se entienden:");
+  eq(L.addDays("2026-11-30", 1), "2026-12-01", "fin de mes:");
+  eq(L.addDays("2026-03-01", -1), "2026-02-28", "febrero:");
+  eq(L.addDays("2026-12-31", 1), "2027-01-01", "fin de año:");
+});
+
+test("Un día que no tocaba en medio de la racha no la corta", () => {
+  const x = mk({ days: [1, 3, 5] }); // lun, mié, vie
+  const m = regs({ "2026-11-09": true, "2026-11-11": true, "2026-11-13": true });
+  eq(L.streak(x, "2026-11-13", m, HOY).count, 3, "vie 13:");
+  ok(!L.shouldWarn(x, "2026-11-16", m, "2026-11-16"), "el lunes 16 no avisa (el viernes cumplió):");
+  eq(L.prevScheduled(x, "2026-11-16"), "2026-11-13", "anterior programado al lunes 16:");
+});
+
+test("Hábito creado hoy: no muestra el aviso", () => {
+  const x = mk({ created_at: ts(2026, 11, 15, 8) });
+  ok(!L.shouldWarn(x, HOY, new Map(), HOY), "creado hoy:");
+  eq(L.streak(x, HOY, new Map(), HOY).count, 0, "racha:");
+  eq(L.dayStatus(x, "2026-11-14", undefined, HOY), "blank", "ayer (antes de crearse):");
+  const ayer = mk({ created_at: ts(2026, 11, 14, 8) });
+  ok(L.shouldWarn(ayer, HOY, new Map(), HOY), "control: creado ayer y sin registro ayer, avisa:");
+});
+
+test("kind 'romper': done = lo evité", () => {
+  const x = mk({ kind: "romper" });
+  const m = regs({ "2026-11-13": true, "2026-11-14": true });
+  eq(L.streak(x, HOY, m, HOY).count, 2, "hoy sin registro no corta:");
+  ok(!L.shouldWarn(x, HOY, m, HOY), "ayer lo evitó:");
+  ok(L.shouldWarn(x, HOY, regs({ "2026-11-13": true, "2026-11-14": false }), HOY), "ayer no lo evitó:");
+  const n = mk({ kind: "romper", measure: "number", target_num: 2, target_dir: "max" });
+  ok(L.computeDone(n, 2), "2 cigarrillos con máximo 2:");
+  ok(!L.computeDone(n, 3), "3 cigarrillos con máximo 2:");
+});
+
+test("number con 'max' y valor 0", () => {
+  const x = mk({ measure: "number", target_num: 3, target_dir: "max" });
+  ok(L.computeDone(x, 0), "0 ≤ 3:");
+  ok(L.computeDone(x, 3), "3 ≤ 3:");
+  ok(!L.computeDone(x, 4), "4 ≤ 3:");
+  ok(!L.computeDone(x, null), "sin registrar no es cumplido:");
+  ok(!L.computeDone(mk({ measure: "number", target_num: 1, target_dir: "min" }), 0), "0 ≥ 1:");
+  ok(L.computeDone(mk({ measure: "number" }), 0), "sin meta, 0 es un valor:");
+  ok(L.computeDone(mk({ measure: "number", target_num: 3 }), 3), "meta sin dirección usa 'min':");
+});
+
+test("time con 'min' y 'max'", () => {
+  const max = mk({ measure: "time", target_time: "07:00:00", target_dir: "max" });
+  ok(L.computeDone(max, "06:45"), "06:45 no después de 07:00:");
+  ok(L.computeDone(max, "07:00"), "07:00 no después de 07:00:");
+  ok(!L.computeDone(max, "07:01"), "07:01 no después de 07:00:");
+  ok(L.computeDone(max, "06:45:00"), "formato de la base HH:MM:SS:");
+  const min = mk({ measure: "time", target_time: "22:00", target_dir: "min" });
+  ok(L.computeDone(min, "22:30"), "22:30 no antes de 22:00:");
+  ok(!L.computeDone(min, "21:59"), "21:59 no antes de 22:00:");
+  ok(L.computeDone(mk({ measure: "time" }), "10:00"), "sin meta, hay valor:");
+  ok(!L.computeDone(min, null), "sin registrar:");
+});
+
+test("Racha vista en una fecha pasada", () => {
+  const x = mk();
+  const m = regs({
+    "2026-11-05": true, "2026-11-06": true, "2026-11-07": true, "2026-11-08": true,
+    "2026-11-09": true, "2026-11-10": true, "2026-11-11": false,
+    "2026-11-12": true, "2026-11-13": true, "2026-11-14": true,
+  });
+  eq(L.streak(x, "2026-11-10", m, HOY).count, 6, "al 10/11 (5 al 10):");
+  eq(L.streak(x, "2026-11-11", m, HOY).count, 0, "al 11/11 (falló):");
+  eq(L.streak(x, HOY, m, HOY).count, 3, "hoy sin registro (12 al 14):");
+  ok(L.shouldWarn(x, "2026-11-12", m, HOY), "al 12/11 avisa (el 11 falló):");
+  eq(L.streak(x, "2026-11-10", m, HOY, "2026-11-07"), { count: 4, capped: true }, "con datos desde el 7:");
+});
+
+test("Lunes de la semana para un domingo", () => {
+  eq(L.mondayOf("2026-11-15"), "2026-11-09", "domingo 15/11:");
+  eq(L.mondayOf("2026-11-09"), "2026-11-09", "lunes 9/11:");
+  eq(L.mondayOf("2026-11-01"), "2026-10-26", "domingo 1/11 (cambio de mes):");
+  eq(L.mondayOf("2027-01-03"), "2026-12-28", "domingo 3/1/2027 (cambio de año):");
+});
+
+test("Días pasados sin done son ✗ (con o sin checkin); '·' solo hoy sin registro", () => {
+  const x = mk();
+  eq(L.dayStatus(x, "2026-11-13", { done: false }, HOY), "fail", "pasado con checkin no cumplido:");
+  eq(L.dayStatus(x, "2026-11-14", undefined, HOY), "fail", "pasado sin checkin:");
+  eq(L.dayStatus(x, "2026-11-12", { done: true }, HOY), "done", "pasado cumplido:");
+  eq(L.dayStatus(x, HOY, undefined, HOY), "pending", "hoy sin registro:");
+  eq(L.dayStatus(x, HOY, { done: true }, HOY), "done", "hoy cumplido:");
+  eq(L.dayStatus(x, HOY, { done: false }, HOY), "fail", "hoy con registro que no cumple:");
+  eq(L.dayStatus(x, "2026-10-31", undefined, HOY), "blank", "antes de crearse:");
+  eq(L.dayStatus(mk({ days: [1] }), "2026-11-14", undefined, HOY), "blank", "no tocaba:");
+  eq(L.dayStatus(x, "2026-11-16", undefined, HOY), "blank", "futuro:");
+  const r = L.weekSummary(x, "2026-11-09", regs({ "2026-11-09": true }), HOY);
+  eq([r.done, r.scheduled], [1, 6], "resumen: 6 días pasados sin done cuentan como programados:");
+});
+
+test("Revisión: qué hábitos entran en la semana", () => {
+  const W = "2026-11-09";
+  const act = mk({ id: "a" });
+  ok(L.inReview(act, L.weekSummary(act, W, new Map(), HOY)), "activo que tocaba:");
+  const pau = mk({ id: "p", active: false });
+  ok(!L.inReview(pau, L.weekSummary(pau, W, new Map(), HOY)), "pausado sin checkins:");
+  ok(L.inReview(pau, L.weekSummary(pau, W, regs({ "2026-11-12": false }), HOY)), "pausado con un checkin:");
+  const despues = mk({ id: "n", created_at: ts(2026, 11, 16) });
+  ok(!L.inReview(despues, L.weekSummary(despues, W, new Map(), HOY)), "creado después de la semana:");
+  ok(!L.showsInHoy(pau, HOY), "un pausado no aparece en Hoy:");
+  ok(L.isScheduled(pau, HOY), "pero sí tiene grilla en Historial:");
+});
+
+test("Formulario: limpia las metas según el tipo", () => {
+  let p = L.normalizeHabit({ name: " Leer ", measure: "check", target_num: "5", target_time: "07:00", target_dir: "max", days: [3, 1, 1] }).payload;
+  eq([p.name, p.target_num, p.target_time, p.target_dir, p.days], ["Leer", null, null, null, [1, 3]], "check:");
+  p = L.normalizeHabit({ name: "Agua", measure: "number", target_num: "2,5", target_time: "07:00", days: [0] }).payload;
+  eq([p.target_num, p.target_time, p.target_dir], [2.5, null, "min"], "number:");
+  p = L.normalizeHabit({ name: "Dormir", measure: "time", target_num: "8", target_time: "23:30:00", target_dir: "max", days: [0] }).payload;
+  eq([p.target_num, p.target_time, p.target_dir], [null, "23:30", "max"], "time:");
+  p = L.normalizeHabit({ name: "Fumar", kind: "romper", stack_after: "café", two_minute: "x", friction: " y ", days: [0] }).payload;
+  eq([p.stack_after, p.two_minute, p.friction], [null, null, "y"], "romper:");
+  ok(L.normalizeHabit({ name: "   ", days: [0] }).error, "sin nombre:");
+  ok(L.normalizeHabit({ name: "X", days: [] }).error, "sin días:");
+});
+
+test("Ideas del libro: hábitos activos según sus campos", () => {
+  const c = mk({ id: "c", environment: "libro en la almohada", reward: "té" });
+  const r = mk({ id: "r", kind: "romper", environment: "celular en otra pieza", reward: "" });
+  const p = mk({ id: "p", active: false, environment: "x" });
+  eq(L.habitsForIdea(6, [c, r, p]).map((x) => x.id), ["c"], "idea 6:");
+  eq(L.habitsForIdea(7, [c, r, p]).map((x) => x.id), ["r"], "idea 7:");
+  eq(L.habitsForIdea(15, [c, r]).map((x) => x.id), ["c"], "idea 15:");
+  eq(L.habitsForIdea(17, [c, r]).map((x) => x.id), [], "idea 17 (reward vacío):");
+  eq(L.habitsForIdea(1, [c, r]).length, 0, "idea sin campos:");
+});
+
+test("Textos de fechas", () => {
+  eq(L.longDate("2026-11-10"), "Martes 10 de noviembre");
+  eq(L.weekLabel("2026-11-09"), "Semana del 9 al 15 de noviembre");
+  eq(L.weekLabel("2026-10-26"), "Semana del 26 de octubre al 1 de noviembre");
+  eq(L.daysLabel([1, 3, 5]), "Lu Mi Vi");
+});
+
+const lista = document.getElementById("lista");
+let pasaron = 0;
+for (const t of tests) {
+  const li = document.createElement("li");
+  try {
+    t.fn();
+    pasaron++;
+    li.className = "pass";
+    li.textContent = "✓ " + t.nombre;
+  } catch (e) {
+    li.className = "fail";
+    li.textContent = "✗ " + t.nombre + " — " + e.message;
+  }
+  lista.append(li);
+}
+const resumen = `${pasaron} de ${tests.length} tests pasaron`;
+document.getElementById("resumen").textContent = resumen;
+document.title = (pasaron === tests.length ? "OK " : "FALLAN ") + resumen;
+console.log("TESTS:", resumen);
+</script>
+</body>
+</html>
